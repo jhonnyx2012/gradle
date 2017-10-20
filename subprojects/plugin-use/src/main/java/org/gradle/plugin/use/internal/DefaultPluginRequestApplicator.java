@@ -33,6 +33,7 @@ import org.gradle.api.internal.plugins.PluginManagerInternal;
 import org.gradle.api.internal.plugins.PluginRegistry;
 import org.gradle.api.plugins.InvalidPluginException;
 import org.gradle.api.plugins.UnknownPluginException;
+import org.gradle.configuration.ScriptTarget;
 import org.gradle.internal.classpath.CachedClasspathTransformer;
 import org.gradle.internal.classpath.ClassPath;
 import org.gradle.internal.exceptions.LocationAwareException;
@@ -79,12 +80,15 @@ public class DefaultPluginRequestApplicator implements PluginRequestApplicator {
         this.cachedClasspathTransformer = cachedClasspathTransformer;
     }
 
-    public void applyPlugins(final PluginRequests requests, final ScriptHandlerInternal scriptHandler, @Nullable final PluginManagerInternal target, final ClassLoaderScope classLoaderScope) {
-        if (requests.isEmpty()) {
+    public void applyPlugins(final PluginRequests requests, final ScriptHandlerInternal scriptHandler, ScriptTarget target, final ClassLoaderScope classLoaderScope) {
+        if (requests.isEmpty() || !target.getSupportsPluginsBlock()) {
             defineScriptHandlerClassScope(scriptHandler, classLoaderScope, Collections.<PluginImplementation<?>>emptyList());
-            return;
+        } else {
+            applyPlugins(requests, scriptHandler, target.getPluginManager(), classLoaderScope);
         }
+    }
 
+    public void applyPlugins(final PluginRequests requests, final ScriptHandlerInternal scriptHandler, @Nullable final PluginManagerInternal target, final ClassLoaderScope classLoaderScope) {
         if (target == null) {
             throw new IllegalStateException("Plugin target is 'null' and there are plugin requests");
         }
