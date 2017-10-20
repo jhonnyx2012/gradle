@@ -280,5 +280,6 @@ class TestTest extends AbstractConventionTaskTest {
         test.setBinResultsDir(binResultsDir)
         test.getReports().getHtml().setDestination(reportDir)
         test.setClasspath(classpathMock)
+        test.setTestListenerBuildOperationAdapter(Mock(TestListenerBuildOperationAdapter))
     }
 }

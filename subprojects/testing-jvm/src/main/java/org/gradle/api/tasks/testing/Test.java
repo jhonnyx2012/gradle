@@ -92,6 +92,8 @@ import org.gradle.internal.logging.progress.ProgressLogger;
 import org.gradle.internal.logging.progress.ProgressLoggerFactory;
 import org.gradle.internal.logging.text.StyledTextOutputFactory;
 import org.gradle.internal.operations.BuildOperationExecutor;
+import org.gradle.internal.operations.BuildOperationIdFactory;
+import org.gradle.internal.progress.BuildOperationListener;
 import org.gradle.internal.reflect.Instantiator;
 import org.gradle.internal.remote.internal.inet.InetAddressFactory;
 import org.gradle.internal.time.Clock;
@@ -115,50 +117,27 @@ import java.util.Set;
 import static org.gradle.util.ConfigureUtil.configureUsing;
 
 /**
- * Executes JUnit (3.8.x or 4.x) or TestNG tests. Test are always run in (one or more) separate JVMs.
- * The sample below shows various configuration options.
+ * Executes JUnit (3.8.x or 4.x) or TestNG tests. Test are always run in (one or more) separate JVMs. The sample below shows various configuration options.
  *
- * <pre class='autoTested'>
- * apply plugin: 'java' // adds 'test' task
+ * <pre class='autoTested'> apply plugin: 'java' // adds 'test' task
  *
- * test {
- *   // enable TestNG support (default is JUnit)
- *   useTestNG()
+ * test { // enable TestNG support (default is JUnit) useTestNG()
  *
- *   // set a system property for the test JVM(s)
- *   systemProperty 'some.prop', 'value'
+ * // set a system property for the test JVM(s) systemProperty 'some.prop', 'value'
  *
- *   // explicitly include or exclude tests
- *   include 'org/foo/**'
- *   exclude 'org/boo/**'
+ * // explicitly include or exclude tests include 'org/foo/**' exclude 'org/boo/**'
  *
- *   // show standard out and standard error of the test JVM(s) on the console
- *   testLogging.showStandardStreams = true
+ * // show standard out and standard error of the test JVM(s) on the console testLogging.showStandardStreams = true
  *
- *   // set heap size for the test JVM(s)
- *   minHeapSize = "128m"
- *   maxHeapSize = "512m"
+ * // set heap size for the test JVM(s) minHeapSize = "128m" maxHeapSize = "512m"
  *
- *   // set JVM arguments for the test JVM(s)
- *   jvmArgs '-XX:MaxPermSize=256m'
+ * // set JVM arguments for the test JVM(s) jvmArgs '-XX:MaxPermSize=256m'
  *
- *   // listen to events in the test execution lifecycle
- *   beforeTest { descriptor -&gt;
- *      logger.lifecycle("Running test: " + descriptor)
- *   }
+ * // listen to events in the test execution lifecycle beforeTest { descriptor -&gt; logger.lifecycle("Running test: " + descriptor) }
  *
- *   // listen to standard out and standard error of the test JVM(s)
- *   onOutput { descriptor, event -&gt;
- *      logger.lifecycle("Test: " + descriptor + " produced standard out/err: " + event.message )
- *   }
- * }
- * </pre>
- * <p>
- * The test process can be started in debug mode (see {@link #getDebug()}) in an ad-hoc manner by supplying the `--debug-jvm` switch when invoking the build.
- * <pre>
- * gradle someTestTask --debug-jvm
- * </pre>
-
+ * // listen to standard out and standard error of the test JVM(s) onOutput { descriptor, event -&gt; logger.lifecycle("Test: " + descriptor + " produced standard out/err: " + event.message ) } }
+ * </pre> <p> The test process can be started in debug mode (see {@link #getDebug()}) in an ad-hoc manner by supplying the `--debug-jvm` switch when invoking the build. <pre> gradle someTestTask
+ * --debug-jvm </pre>
  */
 @CacheableTask
 public class Test extends ConventionTask implements JavaForkOptions, PatternFilterable, VerificationTask, Reporting<TestTaskReports> {
@@ -181,6 +160,7 @@ public class Test extends ConventionTask implements JavaForkOptions, PatternFilt
     private long forkEvery;
     private int maxParallelForks = 1;
     private TestReporter testReporter;
+    private TestListenerBuildOperationAdapter testListenerBuildOperationAdapter;
     private final TestTaskReports reports;
 
     public Test() {
@@ -261,6 +241,13 @@ public class Test extends ConventionTask implements JavaForkOptions, PatternFilt
      */
     void setTestReporter(TestReporter testReporter) {
         this.testReporter = testReporter;
+    }
+
+    /**
+     * ATM. for testing only
+     */
+    void setTestListenerBuildOperationAdapter(TestListenerBuildOperationAdapter testListenerBuildOperationAdapter) {
+        this.testListenerBuildOperationAdapter = testListenerBuildOperationAdapter;
     }
 
     /**
@@ -653,7 +640,13 @@ public class Test extends ConventionTask implements JavaForkOptions, PatternFilt
         addTestListener(testCountLogger);
 
         testListenerInternalBroadcaster.add(new TestListenerAdapter(testListenerBroadcaster.getSource(), testOutputListenerBroadcaster.getSource()));
-        testListenerInternalBroadcaster.add(new TestListenerBuildOperationAdapter(getBuildOperationExecutor().getCurrentOperation(), getBuildOperationExecutor()));
+        if (testListenerBuildOperationAdapter == null) {
+            // could this be a service?
+            testListenerBuildOperationAdapter = new TestListenerBuildOperationAdapter(getBuildOperationExecutor().getCurrentOperation(),
+                getListenerManager().getBroadcaster(BuildOperationListener.class), getBuildOperationIdFactory(),
+                getClock());
+        }
+        testListenerInternalBroadcaster.add(testListenerBuildOperationAdapter);
 
         ProgressLogger parentProgressLogger = getProgressLoggerFactory().newOperation(Test.class);
         parentProgressLogger.setDescription("Test Execution");
@@ -700,8 +693,8 @@ public class Test extends ConventionTask implements JavaForkOptions, PatternFilt
             JUnitXmlReport junitXml = reports.getJunitXml();
             if (junitXml.isEnabled()) {
                 TestOutputAssociation outputAssociation = junitXml.isOutputPerTestCase()
-                        ? TestOutputAssociation.WITH_TESTCASE
-                        : TestOutputAssociation.WITH_SUITE;
+                    ? TestOutputAssociation.WITH_TESTCASE
+                    : TestOutputAssociation.WITH_SUITE;
                 Binary2JUnitXmlReportGenerator binary2JUnitXmlReportGenerator = new Binary2JUnitXmlReportGenerator(junitXml.getDestination(), testResultsProvider, outputAssociation, getBuildOperationExecutor(), getInetAddressFactory().getHostname());
                 binary2JUnitXmlReportGenerator.generate();
             }
@@ -716,6 +709,7 @@ public class Test extends ConventionTask implements JavaForkOptions, PatternFilt
             CompositeStoppable.stoppable(testResultsProvider).stop();
             testReporter = null;
             testFramework = null;
+            testListenerBuildOperationAdapter = null;
         }
 
         if (testCountLogger.hadFailures()) {
@@ -827,17 +821,9 @@ public class Test extends ConventionTask implements JavaForkOptions, PatternFilt
      * Adds a closure to be notified when output from the test received. A {@link org.gradle.api.tasks.testing.TestDescriptor} and {@link org.gradle.api.tasks.testing.TestOutputEvent} instance are
      * passed to the closure as a parameter.
      *
-     * <pre class='autoTested'>
-     * apply plugin: 'java'
+     * <pre class='autoTested'> apply plugin: 'java'
      *
-     * test {
-     *    onOutput { descriptor, event -&gt;
-     *        if (event.destination == TestOutputEvent.Destination.StdErr) {
-     *            logger.error("Test: " + descriptor + ", error: " + event.message)
-     *        }
-     *    }
-     * }
-     * </pre>
+     * test { onOutput { descriptor, event -&gt; if (event.destination == TestOutputEvent.Destination.StdErr) { logger.error("Test: " + descriptor + ", error: " + event.message) } } } </pre>
      *
      * @param closure The closure to call.
      */
@@ -926,9 +912,7 @@ public class Test extends ConventionTask implements JavaForkOptions, PatternFilt
     }
 
     /**
-     * Sets the test name patterns to be included in execution.
-     * Classes or method names are supported, wildcard '*' is supported.
-     * For more information see the user guide chapter on testing.
+     * Sets the test name patterns to be included in execution. Classes or method names are supported, wildcard '*' is supported. For more information see the user guide chapter on testing.
      *
      * For more information on supported patterns see {@link TestFilter}
      */
@@ -949,7 +933,7 @@ public class Test extends ConventionTask implements JavaForkOptions, PatternFilt
     @Internal
     public File getTestClassesDir() {
         SingleMessageLogger.nagUserOfReplacedMethod("getTestClassesDir()", "getTestClassesDirs()");
-        if (testClassesDirs==null || testClassesDirs.isEmpty()) {
+        if (testClassesDirs == null || testClassesDirs.isEmpty()) {
             return null;
         }
         return getProject().file(CollectionUtils.first(testClassesDirs));
@@ -981,23 +965,12 @@ public class Test extends ConventionTask implements JavaForkOptions, PatternFilt
     /**
      * Sets the directories to scan for compiled test sources.
      *
-     * Typically, this would be configured to use the output of a source set:
-     * <pre class='autoTested'>
-     * apply plugin: 'java'
+     * Typically, this would be configured to use the output of a source set: <pre class='autoTested'> apply plugin: 'java'
      *
-     * sourceSets {
-     *    integrationTest {
-     *       compileClasspath += main.output
-     *       runtimeClasspath += main.output
-     *    }
-     * }
+     * sourceSets { integrationTest { compileClasspath += main.output runtimeClasspath += main.output } }
      *
-     * task integrationTest(type: Test) {
-     *     // Runs tests from src/integrationTest
-     *     testClassesDirs = sourceSets.integrationTest.output.classesDirs
-     *     classpath = sourceSets.integrationTest.runtimeClasspath
-     * }
-     * </pre>
+     * task integrationTest(type: Test) { // Runs tests from src/integrationTest testClassesDirs = sourceSets.integrationTest.output.classesDirs classpath = sourceSets.integrationTest.runtimeClasspath
+     * } </pre>
      *
      * @param testClassesDirs All test class directories to be used.
      * @since 4.0
@@ -1256,8 +1229,8 @@ public class Test extends ConventionTask implements JavaForkOptions, PatternFilt
     }
 
     /**
-     * Returns the maximum number of forked test processes to execute in parallel. The default value is 1 (no parallel test execution).
-     * It cannot exceed the value of {@literal max-workers} for the current build.
+     * Returns the maximum number of forked test processes to execute in parallel. The default value is 1 (no parallel test execution). It cannot exceed the value of {@literal max-workers} for the
+     * current build.
      *
      * @return The maximum number of forked test processes.
      */
@@ -1292,13 +1265,9 @@ public class Test extends ConventionTask implements JavaForkOptions, PatternFilt
     /**
      * Allows to set options related to which test events are logged to the console, and on which detail level. For example, to show more information about exceptions use:
      *
-     * <pre class='autoTested'>
-     * apply plugin: 'java'
+     * <pre class='autoTested'> apply plugin: 'java'
      *
-     * test.testLogging {
-     *     exceptionFormat "full"
-     * }
-     * </pre>
+     * test.testLogging { exceptionFormat "full" } </pre>
      *
      * For further information see {@link TestLoggingContainer}.
      *
@@ -1313,14 +1282,9 @@ public class Test extends ConventionTask implements JavaForkOptions, PatternFilt
     /**
      * Allows configuring the logging of the test execution, for example log eagerly the standard output, etc.
      *
-     * <pre class='autoTested'>
-     * apply plugin: 'java'
+     * <pre class='autoTested'> apply plugin: 'java'
      *
-     * // makes the standard streams (err and out) visible at console when running tests
-     * test.testLogging {
-     *    showStandardStreams = true
-     * }
-     * </pre>
+     * // makes the standard streams (err and out) visible at console when running tests test.testLogging { showStandardStreams = true } </pre>
      *
      * @param closure configure closure
      */
@@ -1331,14 +1295,9 @@ public class Test extends ConventionTask implements JavaForkOptions, PatternFilt
     /**
      * Allows configuring the logging of the test execution, for example log eagerly the standard output, etc.
      *
-     * <pre class='autoTested'>
-     * apply plugin: 'java'
+     * <pre class='autoTested'> apply plugin: 'java'
      *
-     * // makes the standard streams (err and out) visible at console when running tests
-     * test.testLogging {
-     *    showStandardStreams = true
-     * }
-     * </pre>
+     * // makes the standard streams (err and out) visible at console when running tests test.testLogging { showStandardStreams = true } </pre>
      *
      * @param action configure action
      * @since 3.5
@@ -1371,7 +1330,6 @@ public class Test extends ConventionTask implements JavaForkOptions, PatternFilt
 
     /**
      * Configures the reports that this task potentially produces.
-     *
      *
      * @param configureAction The configuration
      * @return The reports that this task potentially produces
@@ -1446,5 +1404,15 @@ public class Test extends ConventionTask implements JavaForkOptions, PatternFilt
         } else {
             throw new GradleException(message);
         }
+    }
+
+    @Inject
+    protected BuildOperationIdFactory getBuildOperationIdFactory() {
+        throw new UnsupportedOperationException();
+    }
+
+    @Inject
+    protected Clock getClock() {
+        throw new UnsupportedOperationException();
     }
 }
